@@ -26,14 +26,14 @@ from keras.callbacks import TensorBoard, Callback, ModelCheckpoint
 from keras.models import load_model
 from tensorflow.python.lib.io import file_io
 
-INPUT_SIZE = 16 #####
-CLASS_SIZE = 2 #####
+INPUT_SIZE = 117
+CLASS_SIZE = 2
 
 # CHUNK_SIZE specifies the number of lines
 # to read in case the file is very large
-CHUNK_SIZE = 500
+CHUNK_SIZE = 100
 FILE_PATH = 'checkpoint.{epoch:02d}.hdf5'
-CENSUS_MODEL = 'census.hdf5'
+CHURN_MODEL = 'churn_model.hdf5'
 
 class ContinuousEval(Callback):
   """Continuous eval callback to evaluate the checkpoint once
@@ -53,7 +53,6 @@ class ContinuousEval(Callback):
     self.steps = steps
 
   def on_epoch_begin(self, epoch, logs={}):
-    print "on_ep_beg"
     if epoch > 0 and epoch % self.eval_frequency == 0:
 
       # Unhappy hack to work around h5py not being able to write to GCS.
@@ -64,13 +63,13 @@ class ContinuousEval(Callback):
       checkpoints = glob.glob(model_path_glob)
       if len(checkpoints) > 0:
         checkpoints.sort()
-        census_model = load_model(checkpoints[-1])
-        census_model = model.compile_model(census_model, self.learning_rate)
-        loss, acc = census_model.evaluate_generator(
+        churn_model = load_model(checkpoints[-1])
+        churn_model = model.compile_model(churn_model, self.learning_rate)
+        loss, acc = churn_model.evaluate_generator(
             model.generator_input(self.eval_files, chunk_size=CHUNK_SIZE),
             steps=self.steps)
         print('\nEvaluation epoch[{}] metrics[{:.2f}, {:.2f}] {}'.format(
-            epoch, loss, acc, census_model.metrics_names))
+            epoch, loss, acc, churn_model.metrics_names))
         if self.job_dir.startswith("gs://"):
           copy_file_to_gcs(self.job_dir, checkpoints[-1])
       else:
@@ -91,8 +90,7 @@ def dispatch(train_files,
              eval_num_epochs,
              num_epochs,
              checkpoint_epochs):
-  print "dispatch"
-  census_model = model.model_fn(INPUT_SIZE, CLASS_SIZE)
+  churn_model = model.model_fn(INPUT_SIZE, CLASS_SIZE)
 
   try:
     os.makedirs(job_dir)
@@ -109,6 +107,7 @@ def dispatch(train_files,
   checkpoint = ModelCheckpoint(
       checkpoint_path,
       monitor='val_loss',
+      save_best_only=True,
       verbose=1,
       period=checkpoint_epochs,
       mode='max')
@@ -128,32 +127,29 @@ def dispatch(train_files,
 
   callbacks=[checkpoint, evaluation, tblog]
 
-  census_model.fit_generator(
+  churn_model.fit_generator(
       model.generator_input(train_files, chunk_size=CHUNK_SIZE),
       steps_per_epoch=train_steps,
       epochs=num_epochs,
-      verbose=2)
-  ### callback = callbacks
+      callbacks=callbacks)
 
   # Unhappy hack to work around h5py not being able to write to GCS.
   # Force snapshots and saves to local filesystem, then copy them over to GCS.
   if job_dir.startswith("gs://"):
-    census_model.save(CENSUS_MODEL)
-    copy_file_to_gcs(job_dir, CENSUS_MODEL)
+    churn_model.save(CHURN_MODEL)
+    copy_file_to_gcs(job_dir, CHURN_MODEL)
   else:
-    census_model.save(os.path.join(job_dir, CENSUS_MODEL))
+    churn_model.save(os.path.join(job_dir, CHURN_MODEL))
 
   # Convert the Keras model to TensorFlow SavedModel
-  model.to_savedmodel(census_model, os.path.join(job_dir, 'export'))
+  model.to_savedmodel(churn_model, os.path.join(job_dir, 'export'))
 
 # h5py workaround: copy local models over to GCS if the job_dir is GCS.
 def copy_file_to_gcs(job_dir, file_path):
-  print "copy_file_to_gcs"
   with file_io.FileIO(file_path, mode='r') as input_f:
     with file_io.FileIO(os.path.join(job_dir, file_path), mode='w+') as output_f:
         output_f.write(input_f.read())
 
-        
 ##### required true
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
@@ -169,7 +165,7 @@ if __name__ == "__main__":
                       required=True,
                       type=str,
                       help='GCS or local dir to write checkpoints and export model')
-  parser.add_argument('--train-steps',
+  parser.add_argument('--train_steps',
                       type=int,
                       default=100,
                       help="""\
@@ -178,41 +174,41 @@ if __name__ == "__main__":
                        So if train-steps is 500 and train-batch-size if 100 then
                        at most 500 * 100 training instances will be used to train.
                       """)
-  parser.add_argument('--eval-steps',
+  parser.add_argument('--eval_steps',
                       help='Number of steps to run evalution for at each checkpoint',
                       default=100,
                       type=int)
-  parser.add_argument('--train-batch-size',
+  parser.add_argument('--train_batch_size',
                       type=int,
                       default=40,
                       help='Batch size for training steps')
-  parser.add_argument('--eval-batch-size',
+  parser.add_argument('--eval_batch_size',
                       type=int,
                       default=40,
                       help='Batch size for evaluation steps')
-  parser.add_argument('--learning-rate',
+  parser.add_argument('--learning_rate',
                       type=float,
                       default=0.003,
                       help='Learning rate for SGD')
-  parser.add_argument('--eval-frequency',
+  parser.add_argument('--eval_frequency',
                       default=10,
                       help='Perform one evaluation per n epochs')
-  parser.add_argument('--first-layer-size',
+  parser.add_argument('--first_layer_size',
                      type=int,
                      default=256,
                      help='Number of nodes in the first layer of DNN')
-  parser.add_argument('--num-layers',
+  parser.add_argument('--num_layers',
                      type=int,
                      default=2,
                      help='Number of layers in DNN')
-  parser.add_argument('--scale-factor',
+  parser.add_argument('--scale_factor',
                      type=float,
                      default=0.25,
                      help="""\
                       Rate of decay size of layer for Deep Neural Net.
                       max(2, int(first_layer_size * scale_factor**i)) \
                       """)
-  parser.add_argument('--eval-num-epochs',
+  parser.add_argument('--eval_num_epochs',
                      type=int,
                      default=1,
                      help='Number of epochs during evaluation')
@@ -220,7 +216,7 @@ if __name__ == "__main__":
                       type=int,
                       default=20,
                       help='Maximum number of epochs on which to train')
-  parser.add_argument('--checkpoint-epochs',
+  parser.add_argument('--checkpoint_epochs',
                       type=int,
                       default=5,
                       help='Checkpoint per n training epochs')
