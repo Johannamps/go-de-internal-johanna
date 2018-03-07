@@ -1,225 +1,153 @@
-# Copyright 2017 The TensorFlow Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
-"""This code implements a Feed forward neural network using Keras API."""
-
 import argparse
-import glob
 import json
 import os
-
 import trainer.model as model
 
-from keras.callbacks import TensorBoard, Callback, ModelCheckpoint
-from keras.models import load_model
-from tensorflow.python.lib.io import file_io
+import tensorflow as tf
+from tensorflow.contrib.learn import Experiment
+from tensorflow.contrib.learn.python.learn import learn_runner
+from tensorflow.contrib.learn.python.learn.utils import (
+    saved_model_export_utils)
 
-INPUT_SIZE = 117
-CLASS_SIZE = 2
 
-# CHUNK_SIZE specifies the number of lines
-# to read in case the file is very large
-CHUNK_SIZE = 100
-FILE_PATH = 'checkpoint.{epoch:02d}.hdf5'
-CHURN_MODEL = 'churn_model.hdf5'
+def generate_experiment_fn(train_data_paths,
+                           eval_data_paths,
+                           format,
+                           num_epochs=None,
+                           train_batch_size=512,
+                           eval_batch_size=512,
+                           hidden_units=None,
+                           **experiment_args):
 
-class ContinuousEval(Callback):
-  """Continuous eval callback to evaluate the checkpoint once
-     every so many epochs.
-  """
+  def _experiment_fn(output_dir):
+    input_fn = model.generate_csv_input_fn
+    train_input = input_fn(
+        train_data_paths, num_epochs=num_epochs, batch_size=train_batch_size)
+    eval_input = input_fn(
+        eval_data_paths, batch_size=eval_batch_size, mode=tf.contrib.learn.ModeKeys.EVAL)
+    return Experiment(
+        model.build_estimator(
+            output_dir,
+            hidden_units=hidden_units
+        ),
+        train_input_fn=train_input,
+        eval_input_fn=eval_input,
+        export_strategies=[saved_model_export_utils.make_export_strategy(
+            model.serving_input_fn,
+            default_output_alternative_key=None,
+            exports_to_keep=1
+        )],
+        eval_metrics=model.get_eval_metrics(),
+        #min_eval_frequency = 1000,  # change this to speed up training on large datasets
+        **experiment_args
+    )
+  return _experiment_fn
 
-  def __init__(self,
-               eval_frequency,
-               eval_files,
-               learning_rate,
-               job_dir,
-               steps=1000):
-    self.eval_files = eval_files
-    self.eval_frequency = eval_frequency
-    self.learning_rate = learning_rate
-    self.job_dir = job_dir
-    self.steps = steps
 
-  def on_epoch_begin(self, epoch, logs={}):
-    if epoch > 0 and epoch % self.eval_frequency == 0:
-
-      # Unhappy hack to work around h5py not being able to write to GCS.
-      # Force snapshots and saves to local filesystem, then copy them over to GCS.
-      model_path_glob = 'checkpoint.*'
-      if not self.job_dir.startswith("gs://"):
-        model_path_glob = os.path.join(self.job_dir, model_path_glob)
-      checkpoints = glob.glob(model_path_glob)
-      if len(checkpoints) > 0:
-        checkpoints.sort()
-        churn_model = load_model(checkpoints[-1])
-        churn_model = model.compile_model(churn_model, self.learning_rate)
-        loss, acc = churn_model.evaluate_generator(
-            model.generator_input(self.eval_files, chunk_size=CHUNK_SIZE),
-            steps=self.steps)
-        print('\nEvaluation epoch[{}] metrics[{:.2f}, {:.2f}] {}'.format(
-            epoch, loss, acc, churn_model.metrics_names))
-        if self.job_dir.startswith("gs://"):
-          copy_file_to_gcs(self.job_dir, checkpoints[-1])
-      else:
-        print('\nEvaluation epoch[{}] (no checkpoints found)'.format(epoch))
-
-def dispatch(train_files,
-             eval_files,
-             job_dir,
-             train_steps,
-             eval_steps,
-             train_batch_size,
-             eval_batch_size,
-             learning_rate,
-             eval_frequency,
-             first_layer_size,
-             num_layers,
-             scale_factor,
-             eval_num_epochs,
-             num_epochs,
-             checkpoint_epochs):
-  churn_model = model.model_fn(INPUT_SIZE, CLASS_SIZE)
-
-  try:
-    os.makedirs(job_dir)
-  except:
-    pass
-
-  # Unhappy hack to work around h5py not being able to write to GCS.
-  # Force snapshots and saves to local filesystem, then copy them over to GCS.
-  checkpoint_path = FILE_PATH
-  if not job_dir.startswith("gs://"):
-    checkpoint_path = os.path.join(job_dir, checkpoint_path)
-
-  # Model checkpoint callback
-  checkpoint = ModelCheckpoint(
-      checkpoint_path,
-      monitor='val_loss',
-      save_best_only=True,
-      verbose=1,
-      period=checkpoint_epochs,
-      mode='max')
-
-  # Continuous eval callback
-  evaluation = ContinuousEval(eval_frequency,
-                              eval_files,
-                              learning_rate,
-                              job_dir)
-
-  # Tensorboard logs callback
-  tblog = TensorBoard(
-      log_dir=os.path.join(job_dir, 'logs'),
-      histogram_freq=0,
-      write_graph=True,
-      embeddings_freq=0)
-
-  callbacks=[checkpoint, evaluation, tblog]
-
-  churn_model.fit_generator(
-      model.generator_input(train_files, chunk_size=CHUNK_SIZE),
-      steps_per_epoch=train_steps,
-      epochs=num_epochs,
-      callbacks=callbacks)
-
-  # Unhappy hack to work around h5py not being able to write to GCS.
-  # Force snapshots and saves to local filesystem, then copy them over to GCS.
-  if job_dir.startswith("gs://"):
-    churn_model.save(CHURN_MODEL)
-    copy_file_to_gcs(job_dir, CHURN_MODEL)
-  else:
-    churn_model.save(os.path.join(job_dir, CHURN_MODEL))
-
-  # Convert the Keras model to TensorFlow SavedModel
-  model.to_savedmodel(churn_model, os.path.join(job_dir, 'export'))
-
-# h5py workaround: copy local models over to GCS if the job_dir is GCS.
-def copy_file_to_gcs(job_dir, file_path):
-  with file_io.FileIO(file_path, mode='r') as input_f:
-    with file_io.FileIO(os.path.join(job_dir, file_path), mode='w+') as output_f:
-        output_f.write(input_f.read())
-
-##### required true
-if __name__ == "__main__":
+if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--train_files',
-                      required=True,
-                      type=str,
-                      help='Training files local or GCS', nargs='+')
-  parser.add_argument('--eval_files',
-                      required=True,
-                      type=str,
-                      help='Evaluation files local or GCS', nargs='+')
-  parser.add_argument('--job-dir',
-                      required=True,
-                      type=str,
-                      help='GCS or local dir to write checkpoints and export model')
-  parser.add_argument('--train_steps',
-                      type=int,
-                      default=100,
-                      help="""\
-                       Maximum number of training steps to perform
-                       Training steps are in the units of training-batch-size.
-                       So if train-steps is 500 and train-batch-size if 100 then
-                       at most 500 * 100 training instances will be used to train.
-                      """)
-  parser.add_argument('--eval_steps',
-                      help='Number of steps to run evalution for at each checkpoint',
-                      default=100,
-                      type=int)
-  parser.add_argument('--train_batch_size',
-                      type=int,
-                      default=40,
-                      help='Batch size for training steps')
-  parser.add_argument('--eval_batch_size',
-                      type=int,
-                      default=40,
-                      help='Batch size for evaluation steps')
-  parser.add_argument('--learning_rate',
-                      type=float,
-                      default=0.003,
-                      help='Learning rate for SGD')
-  parser.add_argument('--eval_frequency',
-                      default=10,
-                      help='Perform one evaluation per n epochs')
-  parser.add_argument('--first_layer_size',
-                     type=int,
-                     default=256,
-                     help='Number of nodes in the first layer of DNN')
-  parser.add_argument('--num_layers',
-                     type=int,
-                     default=2,
-                     help='Number of layers in DNN')
-  parser.add_argument('--scale_factor',
-                     type=float,
-                     default=0.25,
-                     help="""\
-                      Rate of decay size of layer for Deep Neural Net.
-                      max(2, int(first_layer_size * scale_factor**i)) \
-                      """)
-  parser.add_argument('--eval_num_epochs',
-                     type=int,
-                     default=1,
-                     help='Number of epochs during evaluation')
-  parser.add_argument('--num_epochs',
-                      type=int,
-                      default=20,
-                      help='Maximum number of epochs on which to train')
-  parser.add_argument('--checkpoint_epochs',
-                      type=int,
-                      default=5,
-                      help='Checkpoint per n training epochs')
-  parse_args, unknown = parser.parse_known_args()
+  # Input Arguments
+  parser.add_argument(
+      '--train_data_paths',
+      help='GCS or local path to training data',
+      required=True
+  )
+  parser.add_argument(
+      '--num_epochs',
+      help="""\
+      Maximum number of training data epochs on which to train.
+      If both --max-steps and --num-epochs are specified,
+      the training job will run for --max-steps or --num-epochs,
+      whichever occurs first. If unspecified will run for --max-steps.\
+      """,
+      type=int,
+  )
+  parser.add_argument(
+      '--train_batch_size',
+      help='Batch size for training steps',
+      type=int,
+      default=512
+  )
+  parser.add_argument(
+      '--eval_batch_size',
+      help='Batch size for evaluation steps',
+      type=int,
+      default=512
+  )
+  parser.add_argument(
+      '--train_steps',
+      help="""\
+      Steps to run the training job for. If --num-epochs is not specified,
+      this must be. Otherwise the training job will run indefinitely.\
+      """,
+      type=int
+  )
+  parser.add_argument(
+      '--eval_steps',
+      help='Number of steps to run evalution for at each checkpoint',
+      default=10,
+      type=int
+  )
+  parser.add_argument(
+      '--eval_data_paths',
+      help='GCS or local path to evaluation data',
+      required=True
+  )
+  # Training arguments
+  parser.add_argument(
+      '--hidden_units',
+      help='List of hidden layer sizes to use for DNN feature columns',
+      nargs='+',
+      type=int,
+      default=[128, 32, 4]
+  )
+  parser.add_argument(
+      '--output_dir',
+      help='GCS location to write checkpoints and export models',
+      required=True
+  )
+  parser.add_argument(
+      '--job-dir',
+      help='this model ignores this field, but it is required by gcloud',
+      default='junk'
+  )
 
-  dispatch(**parse_args.__dict__)
+  # Experiment arguments
+  parser.add_argument(
+      '--eval_delay_secs',
+      help='How long to wait before running first evaluation',
+      default=10,
+      type=int
+  )
+  parser.add_argument(
+      '--min_eval_frequency',
+      help='Minimum number of training steps between evaluations',
+      default=1,
+      type=int
+  )
+  parser.add_argument(
+      '--format',
+      help='Is the input data format csv or tfrecord?',
+      default='csv',
+  )
+
+  args = parser.parse_args()
+  arguments = args.__dict__
+  
+  # unused args provided by service
+  arguments.pop('job_dir', None)
+  arguments.pop('job-dir', None)
+
+  output_dir = arguments.pop('output_dir')
+  # Append trial_id to path if we are doing hptuning
+  # This code can be removed if you are not using hyperparameter tuning
+  output_dir = os.path.join(
+      output_dir,
+      json.loads(
+          os.environ.get('TF_CONFIG', '{}')
+      ).get('task', {}).get('trial', '')
+  )
+
+  # Run the training job
+  learn_runner.run(generate_experiment_fn(**arguments), output_dir)
+
