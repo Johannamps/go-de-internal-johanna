@@ -43,7 +43,7 @@ from tensorflow.python.saved_model.signature_def_utils_impl import build_signatu
 from tensorflow.contrib.session_bundle import exporter
 
 def model_fn(
-    n_seq=334, n_features=5, learning_rate=0.003,
+    n_seq=365, n_features=5, learning_rate=0.003,
     lstm1_nodes=10, lstm2_nodes=10, mlp1_nodes=10
 ):
     model = models.Sequential()
