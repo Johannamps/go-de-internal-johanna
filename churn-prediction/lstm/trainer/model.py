@@ -56,6 +56,7 @@ def model_fn(
     
     return model
 
+
 def compile_model(model, learning_rate):
   model.compile(loss='binary_crossentropy',
                 optimizer=keras.optimizers.SGD(lr=learning_rate),

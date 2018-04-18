@@ -73,10 +73,8 @@ class ContinuousEval(keras.callbacks.Callback):
       else:
         print('\nEvaluation epoch[{}] (no checkpoints found)'.format(epoch))
 
-def dispatch(train_x_file,
-             eval_x_file,
-             train_y_file,
-             eval_y_file,
+def dispatch(train_file,
+             eval_file,
              job_dir,
              train_steps,
              eval_steps,
@@ -91,11 +89,25 @@ def dispatch(train_x_file,
              num_epochs,
              checkpoint_epochs,
              **hyperparams):
+    
+  import pandas as pd
+  import numpy as np
+  from sklearn.model_selection import train_test_split
+
+  training = pd.read_csv('churn_data.csv')
+  labels = pd.read_csv('churn_labels.csv')
+  training = training.iloc[:,1:] #  remove useless first column
+  n_users = 7
+  n_seq = training.shape[0]/n_users
+  n_features = training.shape[1]
+  y = np.array(labels)
+  X = np.array(training).reshape(n_users, n_seq, n_features)
+  X_train, X_eval, y_train, y_eval = train_test_split(X, y)
 
   lstm_model = model.model_fn(learning_rate=learning_rate, **hyperparams)
-
-  train_files = [train_x_file[0], train_y_file[0]]
-  eval_files = [eval_x_file[0], eval_y_file[0]]
+  
+  train_files = [X_train, y_train]
+  eval_files = [X_eval, y_eval]
   try:
     os.makedirs(job_dir)
   except:
@@ -155,20 +167,12 @@ def copy_file_to_gcs(job_dir, file_path):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument('--train-x-file',
-                      required=True,
+  parser.add_argument('--train-file',
+                      #required=True,
                       type=str,
                       help='Training files local or GCS', nargs='+')
-  parser.add_argument('--eval-x-file',
-                      required=True,
-                      type=str,
-                      help='Evaluation files local or GCS', nargs='+')
-  parser.add_argument('--train-y-file',
-                      required=True,
-                      type=str,
-                      help='Training files local or GCS', nargs='+')
-  parser.add_argument('--eval-y-file',
-                      required=True,
+  parser.add_argument('--eval-file',
+                      #required=True,
                       type=str,
                       help='Evaluation files local or GCS', nargs='+')
   parser.add_argument('--job-dir',
