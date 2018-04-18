@@ -90,12 +90,14 @@ def dispatch(train_file,
              checkpoint_epochs,
              **hyperparams):
     
+  print(train_file, eval_file, job_dir, train_steps, eval_steps, train_batch_size, eval_batch_size, learning_rate, eval_frequency, first_layer_size, num_layers, scale_factor, eval_num_epochs, num_epochs, checkpoint_epochs)
+    
   import pandas as pd
   import numpy as np
   from sklearn.model_selection import train_test_split
 
-  training = pd.read_csv('churn_data.csv')
-  labels = pd.read_csv('churn_labels.csv')
+  training = pd.read_csv(train_file)
+  labels = pd.read_csv(eval_file)
   training = training.iloc[:,1:] #  remove useless first column
   n_users = 7
   n_seq = training.shape[0]/n_users
@@ -103,11 +105,11 @@ def dispatch(train_file,
   y = np.array(labels)
   X = np.array(training).reshape(n_users, n_seq, n_features)
   X_train, X_eval, y_train, y_eval = train_test_split(X, y)
-
+    
   lstm_model = model.model_fn(learning_rate=learning_rate, **hyperparams)
   
-  train_files = [X_train, y_train]
-  eval_files = [X_eval, y_eval]
+  train_files = [str(X_train), str(y_train)]
+  eval_files = [str(X_eval), str(y_eval)]
   try:
     os.makedirs(job_dir)
   except:
@@ -168,11 +170,11 @@ def copy_file_to_gcs(job_dir, file_path):
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument('--train-file',
-                      #required=True,
+                      required=True,
                       type=str,
                       help='Training files local or GCS', nargs='+')
   parser.add_argument('--eval-file',
-                      #required=True,
+                      required=True,
                       type=str,
                       help='Evaluation files local or GCS', nargs='+')
   parser.add_argument('--job-dir',
